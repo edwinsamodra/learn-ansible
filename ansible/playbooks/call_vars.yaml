@@ -1,6 +1,0 @@
-- name: Cek vars in Inventory
-  hosts: node1
-  tasks:
-    - name: Print name
-      debug:
-        msg: "Namaku {{ namaku_siapa}}"
