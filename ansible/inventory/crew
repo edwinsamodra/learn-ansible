@@ -1,0 +1,20 @@
+crew:
+  hosts:
+    node1:
+      ansible_host: 192.168.56.3
+      ansible_port: 22
+      ansible_connection: ssh
+      ansible_become: yes
+    node2:
+      ansible_host: 192.168.56.4
+      ansible_port: 22
+      ansible_connection: ssh
+    node3:
+      ansible_host: 192.168.56.5
+      ansible_port: 22
+      ansible_connection: ssh
+
+  vars:
+    ansible_become: yes
+    ansible_become_method: sudo
+    namaku_siapa: edwin
