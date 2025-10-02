@@ -1,0 +1,487 @@
+---
+# Three-Tier Application Deployment Playbook
+# Frontend (Nginx) -> Backend (Node.js) -> Database (MariaDB)
+
+# Common pre-install tasks for all hosts
+- name: Common Pre-Install Tasks
+  hosts: all
+  become: true
+  tasks:
+    - name: Update apt cache with retry
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      register: apt_update_result
+      until: apt_update_result is succeeded
+      retries: 3
+      delay: 10
+
+    - name: Fix broken dpkg if any
+      command: dpkg --configure -a
+      ignore_errors: true
+
+    - name: Fix broken dependencies if any
+      apt:
+        name: "*"
+        state: fixed
+      ignore_errors: true
+
+    - name: Install common packages
+      apt:
+        name:
+          - curl
+          - wget
+          - unzip
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+        state: present
+
+# Database Tier Setup
+- name: Setup Database Tier (MariaDB)
+  hosts: db
+  become: true
+  vars:
+    mysql_root_password: "SecureRootPass123!"
+    app_db_name: "appdb"
+    app_db_user: "appuser"
+    app_db_password: "AppPass123!"
+  tasks:
+    - name: Install MariaDB Server and dependencies
+      apt:
+        name:
+          - mariadb-server
+          - mariadb-client
+          - python3-pymysql
+        state: present
+
+    - name: Start and enable MariaDB service
+      service:
+        name: mariadb
+        state: started
+        enabled: true
+
+    - name: Set MariaDB root password
+      mysql_user:
+        name: root
+        password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        state: present
+
+    - name: Create MariaDB configuration
+      template:
+        content: |
+          [client]
+          user=root
+          password={{ mysql_root_password }}
+        dest: /root/.my.cnf
+        mode: '0600'
+
+    - name: Remove anonymous users
+      mysql_user:
+        name: ""
+        host_all: yes
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Remove test database
+      mysql_db:
+        name: test
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Create application database
+      mysql_db:
+        name: "{{ app_db_name }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Create application database user
+      mysql_user:
+        name: "{{ app_db_user }}"
+        password: "{{ app_db_password }}"
+        priv: "{{ app_db_name }}.*:ALL"
+        host: "%"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Configure MariaDB for remote connections
+      lineinfile:
+        path: /etc/mysql/mariadb.conf.d/50-server.cnf
+        regexp: '^bind-address'
+        line: 'bind-address = 0.0.0.0'
+      notify: restart mariadb
+
+    - name: Create sample table in application database
+      mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_db: "{{ app_db_name }}"
+        query: |
+          CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            username VARCHAR(50) NOT NULL UNIQUE,
+            email VARCHAR(100) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          INSERT IGNORE INTO users (username, email) VALUES 
+          ('admin', 'admin@example.com'),
+          ('user1', 'user1@example.com');
+
+  handlers:
+    - name: restart mariadb
+      service:
+        name: mariadb
+        state: restarted
+
+# Backend Application Tier Setup
+- name: Setup Backend Tier (Node.js)
+  hosts: be
+  become: true
+  vars:
+    node_version: "18"
+    app_port: 3000
+  tasks:
+    - name: Add NodeSource repository key
+      apt_key:
+        url: https://deb.nodesource.com/gpgkey/nodesource.gpg.key
+        state: present
+
+    - name: Add NodeSource repository
+      apt_repository:
+        repo: "deb https://deb.nodesource.com/node_{{ node_version }}.x {{ ansible_distribution_release }} main"
+        state: present
+
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+        update_cache: yes
+
+    - name: Create application directory
+      file:
+        path: /opt/app
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Create simple Node.js application
+      copy:
+        content: |
+          const express = require('express');
+          const mysql = require('mysql2');
+          const app = express();
+          const port = {{ app_port }};
+
+          // Database connection
+          const db = mysql.createConnection({
+            host: '{{ hostvars[groups["db"][0]]["ansible_host"] }}',
+            user: 'appuser',
+            password: 'AppPass123!',
+            database: 'appdb'
+          });
+
+          app.use(express.json());
+
+          // Health check endpoint
+          app.get('/health', (req, res) => {
+            res.json({ status: 'OK', timestamp: new Date().toISOString() });
+          });
+
+          // Get users endpoint
+          app.get('/api/users', (req, res) => {
+            db.query('SELECT * FROM users', (err, results) => {
+              if (err) {
+                res.status(500).json({ error: err.message });
+              } else {
+                res.json(results);
+              }
+            });
+          });
+
+          // Add user endpoint
+          app.post('/api/users', (req, res) => {
+            const { username, email } = req.body;
+            db.query('INSERT INTO users (username, email) VALUES (?, ?)', 
+              [username, email], (err, result) => {
+              if (err) {
+                res.status(500).json({ error: err.message });
+              } else {
+                res.json({ id: result.insertId, username, email });
+              }
+            });
+          });
+
+          app.listen(port, '0.0.0.0', () => {
+            console.log(`Server running on port ${port}`);
+          });
+        dest: /opt/app/server.js
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Create package.json
+      copy:
+        content: |
+          {
+            "name": "three-tier-app-backend",
+            "version": "1.0.0",
+            "description": "Backend for three-tier application",
+            "main": "server.js",
+            "scripts": {
+              "start": "node server.js"
+            },
+            "dependencies": {
+              "express": "^4.18.2",
+              "mysql2": "^3.6.0"
+            }
+          }
+        dest: /opt/app/package.json
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Install Node.js dependencies
+      npm:
+        path: /opt/app
+        state: present
+
+    - name: Create systemd service for Node.js app
+      copy:
+        content: |
+          [Unit]
+          Description=Three Tier App Backend
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=www-data
+          WorkingDirectory=/opt/app
+          ExecStart=/usr/bin/node server.js
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/app-backend.service
+        mode: '0644'
+
+    - name: Reload systemd and start backend service
+      systemd:
+        name: app-backend
+        daemon_reload: yes
+        state: started
+        enabled: yes
+
+# Frontend Web Tier Setup
+- name: Setup Frontend Tier (Nginx)
+  hosts: fe
+  become: true
+  tasks:
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Create web directory
+      file:
+        path: /var/www/app
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Create simple HTML frontend
+      copy:
+        content: |
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Three Tier Application</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 40px; }
+                  .container { max-width: 800px; margin: 0 auto; }
+                  .user { border: 1px solid #ddd; padding: 10px; margin: 10px 0; }
+                  button { padding: 10px 20px; margin: 10px 0; }
+                  input { padding: 5px; margin: 5px; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>Three Tier Application</h1>
+                  <h2>Users</h2>
+                  <div id="users"></div>
+                  
+                  <h2>Add User</h2>
+                  <input type="text" id="username" placeholder="Username">
+                  <input type="email" id="email" placeholder="Email">
+                  <button onclick="addUser()">Add User</button>
+                  <button onclick="loadUsers()">Refresh</button>
+              </div>
+
+              <script>
+                  const API_URL = 'http://{{ hostvars[groups["be"][0]]["ansible_host"] }}:3000/api';
+
+                  async function loadUsers() {
+                      try {
+                          const response = await fetch(`${API_URL}/users`);
+                          const users = await response.json();
+                          const usersDiv = document.getElementById('users');
+                          usersDiv.innerHTML = users.map(user => 
+                              `<div class="user">
+                                  <strong>${user.username}</strong> - ${user.email}
+                                  <br><small>Created: ${user.created_at}</small>
+                              </div>`
+                          ).join('');
+                      } catch (error) {
+                          console.error('Error loading users:', error);
+                      }
+                  }
+
+                  async function addUser() {
+                      const username = document.getElementById('username').value;
+                      const email = document.getElementById('email').value;
+                      
+                      if (!username || !email) {
+                          alert('Please fill in both fields');
+                          return;
+                      }
+
+                      try {
+                          const response = await fetch(`${API_URL}/users`, {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ username, email })
+                          });
+                          
+                          if (response.ok) {
+                              document.getElementById('username').value = '';
+                              document.getElementById('email').value = '';
+                              loadUsers();
+                          } else {
+                              alert('Error adding user');
+                          }
+                      } catch (error) {
+                          console.error('Error adding user:', error);
+                      }
+                  }
+
+                  // Load users on page load
+                  loadUsers();
+              </script>
+          </body>
+          </html>
+        dest: /var/www/app/index.html
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Configure Nginx site
+      copy:
+        content: |
+          server {
+              listen 80;
+              server_name _;
+              
+              root /var/www/app;
+              index index.html;
+
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+
+              # Proxy API requests to backend
+              location /api/ {
+                  proxy_pass http://{{ hostvars[groups["be"][0]]["ansible_host"] }}:3000/api/;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+
+              # Health check
+              location /health {
+                  proxy_pass http://{{ hostvars[groups["be"][0]]["ansible_host"] }}:3000/health;
+              }
+          }
+        dest: /etc/nginx/sites-available/app
+        mode: '0644'
+
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/app
+        dest: /etc/nginx/sites-enabled/app
+        state: link
+
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_test
+      failed_when: nginx_test.rc != 0
+
+    - name: Start and enable Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
+# Health Checks and Verification
+- name: Verify Three-Tier Application
+  hosts: all
+  become: true
+  tasks:
+    - name: Check if services are running
+      service_facts:
+
+    - name: Verify MariaDB is running
+      assert:
+        that:
+          - "'mariadb' in services"
+          - "services['mariadb']['state'] == 'running'"
+        fail_msg: "MariaDB service is not running"
+      when: inventory_hostname in groups['db']
+
+    - name: Verify Node.js backend is running
+      assert:
+        that:
+          - "'app-backend' in services"
+          - "services['app-backend']['state'] == 'running'"
+        fail_msg: "Backend service is not running"
+      when: inventory_hostname in groups['be']
+
+    - name: Verify Nginx is running
+      assert:
+        that:
+          - "'nginx' in services"
+          - "services['nginx']['state'] == 'running'"
+        fail_msg: "Nginx service is not running"
+      when: inventory_hostname in groups['fe']
+
+    - name: Test backend health endpoint
+      uri:
+        url: "http://{{ hostvars[groups['be'][0]]['ansible_host'] }}:3000/health"
+        method: GET
+        return_content: yes
+      register: health_check
+      when: inventory_hostname == groups['fe'][0]
+
+    - name: Display health check result
+      debug:
+        var: health_check.json
+      when: 
+        - inventory_hostname == groups['fe'][0]
+        - health_check is defined

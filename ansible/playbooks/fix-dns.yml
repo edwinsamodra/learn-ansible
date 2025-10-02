@@ -1,0 +1,54 @@
+---
+- name: Backup resolv.conf
+  hosts: valid
+  become: true
+  tasks:
+    - name: Backup existing resolv.conf
+      copy:
+        src: /etc/resolv.conf
+        dest: /etc/resolv.conf.old
+        backup: yes
+
+- name: Fix DNS settings
+  hosts: valid
+  become: true
+  tasks:
+    - name: Set DNS servers in resolv.conf
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 8.8.8.8
+          nameserver 8.8.4.4
+          nameserver 1.1.1.1
+        owner: root
+        group: root
+        mode: '0644'
+
+- name: Pinging Google to verify DNS resolution
+  hosts: valid
+  tasks:
+    - name: Ping Google DNS
+      command: ping -c 4 8.8.8.8
+    
+    - name: Ping Google DNS
+      command: ping -c 4 8.8.4.4
+
+    - name: Ping Cloudflare DNS
+      command: ping -c 4 1.1.1.1
+
+- name: Testing NSLOOKUP to debian.org
+  hosts: valid
+  tasks:
+    - name: Perform nslookup for debian.org
+      command: nslookup debian.org
+      register: nslookup_result
+      ignore_errors: false
+
+    - name: Display nslookup result
+      debug:
+        var: nslookup_result.stdout_lines
+  
+    - name: Check if nslookup was successful
+      fail:
+        msg: "NSLOOKUP failed, DNS resolution is not working."
+      when: nslookup_result.rc != 0

@@ -1,0 +1,222 @@
+---
+# Internet Connectivity Test Playbook
+# Tests various aspects of network connectivity including ping, DNS resolution, and HTTP requests
+
+- name: Test Internet Connectivity
+  hosts: valid
+  gather_facts: true
+  vars:
+    # Test targets
+    test_hosts:
+      - name: "Google DNS"
+        host: "8.8.8.8"
+        type: "ip"
+      - name: "Cloudflare DNS"
+        host: "1.1.1.1"
+        type: "ip"
+      - name: "Google.com"
+        host: "google.com"
+        type: "domain"
+      - name: "GitHub.com"
+        host: "github.com"
+        type: "domain"
+      - name: "Ubuntu Archive"
+        host: "archive.ubuntu.com"
+        type: "domain"
+    
+    # HTTP/HTTPS test URLs
+    http_test_urls:
+      - name: "Google"
+        url: "https://www.google.com"
+        expected_status: 200
+      - name: "GitHub"
+        url: "https://api.github.com"
+        expected_status: 200
+      - name: "Ubuntu Packages"
+        url: "http://archive.ubuntu.com/ubuntu/"
+        expected_status: 200
+
+  tasks:
+    - name: Display test information
+      debug:
+        msg: |
+          Starting internet connectivity tests on {{ inventory_hostname }}
+          IP Address: {{ ansible_default_ipv4.address | default('N/A') }}
+          Gateway: {{ ansible_default_ipv4.gateway | default('N/A') }}
+          DNS Servers: {{ ansible_dns.nameservers | default(['N/A']) | join(', ') }}
+
+    # Basic ping tests to IP addresses
+    - name: Test ping connectivity to IP addresses
+      ping:
+        data: "{{ item.host }}"
+      loop: "{{ test_hosts | selectattr('type', 'equalto', 'ip') | list }}"
+      register: ip_ping_results
+      ignore_errors: true
+
+    - name: Display IP ping results
+      debug:
+        msg: "Ping to {{ item.item.name }} ({{ item.item.host }}): {{ 'SUCCESS' if item.ping is defined else 'FAILED' }}"
+      loop: "{{ ip_ping_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # DNS resolution and ping tests to domain names
+    - name: Test DNS resolution and ping to domains
+      ping:
+        data: "{{ item.host }}"
+      loop: "{{ test_hosts | selectattr('type', 'equalto', 'domain') | list }}"
+      register: domain_ping_results
+      ignore_errors: true
+
+    - name: Display domain ping results
+      debug:
+        msg: "Ping to {{ item.item.name }} ({{ item.item.host }}): {{ 'SUCCESS' if item.ping is defined else 'FAILED' }}"
+      loop: "{{ domain_ping_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # Advanced ping tests with packet count and timeout
+    - name: Advanced ping test with statistics
+      command: ping -c 4 -W 3 {{ item.host }}
+      loop: "{{ test_hosts }}"
+      register: advanced_ping_results
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display advanced ping statistics
+      debug:
+        msg: |
+          Advanced ping to {{ item.item.name }} ({{ item.item.host }}):
+          Status: {{ 'SUCCESS' if item.rc == 0 else 'FAILED' }}
+          {% if item.rc == 0 %}
+          Output: {{ item.stdout_lines[-2:] | join(' ') }}
+          {% else %}
+          Error: {{ item.stderr | default('No response') }}
+          {% endif %}
+      loop: "{{ advanced_ping_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # Test DNS resolution specifically
+    - name: Test DNS resolution
+      command: nslookup {{ item.host }}
+      loop: "{{ test_hosts | selectattr('type', 'equalto', 'domain') | list }}"
+      register: dns_results
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display DNS resolution results 
+      debug:
+        msg: |
+          DNS lookup for {{ item.item.name }} ({{ item.item.host }}):
+          Status: {{ 'SUCCESS' if item.rc == 0 else 'FAILED' }}
+          {% if item.rc == 0 %}
+          Resolved IPs: {{
+            (item.stdout | regex_findall('Address(?:es)?:\s*([0-9a-fA-F\.:]+)'))
+            | default(['Not found'], true)
+          }}
+          {% endif %}
+      loop: "{{ dns_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # Test HTTP/HTTPS connectivity
+    - name: Test HTTP/HTTPS connectivity
+      uri:
+        url: "{{ item.url }}"
+        method: GET
+        timeout: 10
+        validate_certs: yes
+      loop: "{{ http_test_urls }}"
+      register: http_results
+      ignore_errors: true
+
+    - name: Display HTTP connectivity results
+      debug:
+        msg: |
+          HTTP test to {{ item.item.name }} ({{ item.item.url }}):
+          Status: {{ 'SUCCESS' if item.status == item.item.expected_status else 'FAILED' }}
+          Response Code: {{ item.status | default('N/A') }}
+          Response Time: {{ item.elapsed | default('N/A') }}s
+      loop: "{{ http_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item.status is defined
+
+    # Test specific ports
+    - name: Test connectivity to common ports
+      wait_for:
+        host: "{{ item.host }}"
+        port: "{{ item.port }}"
+        timeout: 5
+      vars:
+        port_tests:
+          - { host: "8.8.8.8", port: 53, name: "Google DNS" }
+          - { host: "github.com", port: 443, name: "GitHub HTTPS" }
+          - { host: "google.com", port: 80, name: "Google HTTP" }
+          - { host: "archive.ubuntu.com", port: 80, name: "Ubuntu Archive HTTP" }
+      loop: "{{ port_tests }}"
+      register: port_results
+      ignore_errors: true
+
+    - name: Display port connectivity results
+      debug:
+        msg: "Port {{ item.item.port }} on {{ item.item.name }} ({{ item.item.host }}): {{ 'OPEN' if item.failed is not defined else 'CLOSED/FILTERED' }}"
+      loop: "{{ port_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # Test route to internet
+    - name: Check routing table for default gateway
+      command: ip route show default
+      register: route_result
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display default gateway information
+      debug:
+        msg: |
+          Default Gateway Information:
+          {{ route_result.stdout if route_result.rc == 0 else 'No default route found' }}
+
+    # Test if we can reach package repositories
+    - name: Test package repository connectivity (Ubuntu/Debian)
+      uri:
+        url: "http://archive.ubuntu.com/ubuntu/dists/"
+        method: HEAD
+        timeout: 10
+      register: repo_test
+      ignore_errors: true
+      when: ansible_os_family == "Debian"
+
+    - name: Display repository connectivity result
+      debug:
+        msg: "Ubuntu repository connectivity: {{ 'SUCCESS' if repo_test.status == 200 else 'FAILED' }}"
+      when: ansible_os_family == "Debian" and repo_test.status is defined
+
+    # Summary report
+    - name: Generate connectivity summary
+      debug:
+        msg: |
+          =================================
+          INTERNET CONNECTIVITY SUMMARY
+          =================================
+          Host: {{ inventory_hostname }}
+          
+          IP Ping Tests:
+          {% for result in ip_ping_results.results %}
+          - {{ result.item.name }}: {{ 'PASS' if result.ping is defined else 'FAIL' }}
+          {% endfor %}
+          
+          Domain Ping Tests:
+          {% for result in domain_ping_results.results %}
+          - {{ result.item.name }}: {{ 'PASS' if result.ping is defined else 'FAIL' }}
+          {% endfor %}
+          
+          HTTP Tests:
+          {% for result in http_results.results %}
+          - {{ result.item.name }}: {{ 'PASS' if result.status == result.item.expected_status else 'FAIL' }}
+          {% endfor %}
+          
+          Overall Status: {{ 'CONNECTED' if (ip_ping_results.results | selectattr('ping', 'defined') | list | length) > 0 else 'NO CONNECTIVITY' }}
+          =================================

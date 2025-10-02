@@ -1,0 +1,27 @@
+---
+- name: Patch Keamanan Otomatis untuk Server Linux (Debian/Ubuntu)
+  hosts: valid
+  become: true
+  tasks:
+    - name: Fix broken dependencies
+      command: apt --fix-broken install -y
+      become: true
+
+    - name: Update dan upgrade semua paket
+      apt:
+        update_cache: yes
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+      register: apt_result
+      become: true
+
+    - name: Show the result of apt operations
+      debug:
+        var: apt_result
+
+    - name: Reboot if any changes were made
+      reboot:
+        msg: "Reboot otomatis setelah patch keamanan"
+        pre_reboot_delay: 30
+      when: apt_result.changed
