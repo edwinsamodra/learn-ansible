@@ -19,7 +19,7 @@ Vagrant.configure("2") do |config|
     
     controller.vm.provider "virtualbox" do |vb|
       vb.name = "ansible-controller"
-      vb.memory = "1024"
+      vb.memory = "512"
       vb.cpus = 1
       
       # Ensure NAT adapter is enabled for internet access
