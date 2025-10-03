@@ -1,0 +1,23 @@
+---
+- name: Set timezone to Asia/Jakarta
+  hosts: valid
+  become: true
+  tasks:
+    - name: Check before state
+      command: date
+      register: date_before
+
+    - name: Show the before state
+      debug:
+        var: date_before.stdout
+
+    - name: Set timezone
+      command: timedatectl set-timezone Asia/Jakarta
+
+    - name: Check after state
+      command: date
+      register: date_after
+
+    - name: Show the after state
+      debug:
+        var: date_after.stdout
